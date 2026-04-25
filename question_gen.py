@@ -4,17 +4,23 @@ import re
 import streamlit as st
 from db import fetch_cached_questions, count_cached_questions, insert_questions
 
-# llama3.1-8b: fastest Cortex model, reliable JSON output, sufficient for MCQs
-CORTEX_MODEL = "llama3.1-8b"
-CACHE_MIN    = 10   # top up cache when a topic+difficulty combo drops below this
+# llama3.1-8b for Easy/Medium (fast), mistral-large2 for Hard (better quality)
+MODEL_DEFAULT = "llama3.1-8b"
+MODEL_HARD    = "mistral-large2"
+CACHE_MIN     = 10
 
 
-def _run_cortex(prompt: str) -> str:
+def _model_for(difficulty: str) -> str:
+    return MODEL_HARD if difficulty == "Hard" else MODEL_DEFAULT
+
+
+def _run_cortex(prompt: str, difficulty: str) -> str:
     from db import cursor
+    model = _model_for(difficulty)
     with cursor() as cur:
         cur.execute(
             "SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, %s)",
-            (CORTEX_MODEL, prompt),
+            (model, prompt),
         )
         return cur.fetchone()[0]
 
@@ -38,6 +44,21 @@ Required keys per element: "question_text", "option_a", "option_b", "option_c", 
 JSON array:"""
 
 
+def _build_weakness_prompt(topic: str, difficulty: str, results: list[dict]) -> str:
+    lines = []
+    for r in results:
+        status = "CORRECT" if r["correct"] else f"WRONG (answered {r['user_ans']}, correct was {r['correct_ans']})"
+        lines.append(f"- {r['question']} → {status}")
+    summary = "\n".join(lines)
+    return f"""You are a data engineering coach reviewing a quiz result.
+
+The user took a {difficulty} difficulty quiz on: {topic}.
+Here are their answers:
+{summary}
+
+Write a short, specific 2-3 sentence coaching note. Mention what they got right, identify any weak areas by concept name, and suggest one concrete thing to study next. Be direct and encouraging. No bullet points, just plain paragraph text."""
+
+
 def _parse_questions(raw: str, topic: str, difficulty: str) -> list[dict]:
     raw   = re.sub(r"```json|```", "", raw).strip()
     match = re.search(r"\[.*\]", raw, re.DOTALL)
@@ -52,7 +73,7 @@ def _parse_questions(raw: str, topic: str, difficulty: str) -> list[dict]:
             continue
         opts = [q["option_a"], q["option_b"], q["option_c"], q["option_d"]]
         if len(set(o.strip().lower() for o in opts)) < 4:
-            continue  # discard questions with duplicate answer options
+            continue
         q["topic"]          = topic
         q["difficulty"]     = difficulty
         q["correct_option"] = q["correct_option"].strip().upper()[0]
@@ -62,7 +83,7 @@ def _parse_questions(raw: str, topic: str, difficulty: str) -> list[dict]:
 
 def _generate(topic: str, difficulty: str, count: int) -> list[dict]:
     prompt = _build_prompt(topic, difficulty, count)
-    raw    = _run_cortex(prompt)
+    raw    = _run_cortex(prompt, difficulty)
     qs     = _parse_questions(raw, topic, difficulty)
     if qs:
         insert_questions(qs)
@@ -89,14 +110,12 @@ def get_questions(topics: list[str], difficulty: str, total: int) -> list[dict]:
             except Exception:
                 pass
 
-        # Pass seen_ids so Snowflake excludes already-fetched questions
         fetched = fetch_cached_questions(topic, difficulty, per_topic,
                                          exclude_ids=seen_ids if seen_ids else None)
         for q in fetched:
             questions.append(q)
             seen_ids.add(q["question_id"])
 
-    # Top up if still short, excluding everything already fetched
     if len(questions) < total:
         shortfall = total - len(questions)
         for topic in topics:
@@ -113,3 +132,30 @@ def get_questions(topics: list[str], difficulty: str, total: int) -> list[dict]:
     import random
     random.shuffle(questions)
     return questions[:total]
+
+
+def generate_weakness_report(questions: list[dict], answers: dict,
+                              topics: list[str], difficulty: str) -> str:
+    results = [
+        {
+            "question":   q["question_text"],
+            "user_ans":   answers.get(i, "?"),
+            "correct_ans": q["correct_option"],
+            "correct":    answers.get(i) == q["correct_option"],
+        }
+        for i, q in enumerate(questions)
+    ]
+    topic_str = ", ".join(topics)
+    prompt    = _build_weakness_prompt(topic_str, difficulty, results)
+    try:
+        from db import cursor
+        # Always use mistral-large2 for the report — quality matters here
+        with cursor() as cur:
+            cur.execute(
+                "SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, %s)",
+                (MODEL_HARD, prompt),
+            )
+            return cur.fetchone()[0].strip()
+    except Exception as e:
+        print(f"[question_gen] Weakness report error: {e}")
+        return ""

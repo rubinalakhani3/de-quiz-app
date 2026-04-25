@@ -37,6 +37,8 @@ if "sf_ok" not in st.session_state:
 if not st.session_state["sf_ok"]:
     st.title("🛢️ Data Engineering Quiz")
     st.error("The service is temporarily unavailable. Please try again later.")
+    with st.expander("Technical details"):
+        st.code(st.session_state["sf_error"])
     if st.button("Retry"):
         st.session_state.pop("sf_ok", None)
         st.cache_resource.clear()

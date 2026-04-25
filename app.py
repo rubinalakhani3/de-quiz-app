@@ -1,6 +1,6 @@
 import streamlit as st
 from db import save_session, fetch_leaderboard, test_connection
-from question_gen import get_questions
+from question_gen import get_questions, generate_weakness_report
 
 st.set_page_config(
     page_title="Data Engineering Quiz",
@@ -153,6 +153,18 @@ if page == "Quiz":
             st.info("Good effort! Keep practising. 💪")
         else:
             st.warning("Keep studying — you'll get there! 📚")
+
+        st.divider()
+        with st.spinner("Generating your personalised feedback..."):
+            report = generate_weakness_report(
+                questions  = questions,
+                answers    = st.session_state["answers"],
+                topics     = st.session_state["selected_topics"],
+                difficulty = st.session_state["difficulty"],
+            )
+        if report:
+            st.subheader("Coach Feedback")
+            st.info(report)
 
         st.divider()
         st.subheader("Review")

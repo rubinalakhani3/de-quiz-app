@@ -1,9 +1,7 @@
 import streamlit as st
-from auth import handle_oauth_callback, get_auth_url, is_logged_in, logout
-from db import upsert_user, save_session, fetch_leaderboard, fetch_user_history, test_connection
+from db import save_session, fetch_leaderboard, test_connection
 from question_gen import get_questions
 
-# ── Page config ──────────────────────────────────────────────
 st.set_page_config(
     page_title="Data Engineering Quiz",
     page_icon="🛢️",
@@ -11,34 +9,26 @@ st.set_page_config(
 )
 
 TOPICS = [
-    "SQL",
-    "Snowflake",
-    "dbt",
-    "Apache Spark",
-    "Databricks",
-    "Data Modeling",
-    "ELT/ETL",
-    "Python",
-    "Cloud Storage",
+    "SQL", "Snowflake", "dbt", "Apache Spark", "Databricks",
+    "Data Modeling", "ELT/ETL", "Python", "Cloud Storage",
 ]
-
 DIFFICULTIES = ["Easy", "Medium", "Hard"]
-
-# ── OAuth callback (must run before any UI) ──────────────────
-handle_oauth_callback()
 
 
 # ── Connection check ─────────────────────────────────────────
 if "sf_ok" not in st.session_state:
-    ok, err = test_connection()
-    st.session_state["sf_ok"] = ok
-    st.session_state["sf_err"] = err
+    st.session_state["sf_ok"] = False
+    st.session_state["sf_err"] = ""
+    try:
+        ok, err = test_connection()
+        st.session_state["sf_ok"] = ok
+        st.session_state["sf_err"] = err
+    except Exception as e:
+        st.session_state["sf_err"] = str(e)
 
 if not st.session_state["sf_ok"]:
     st.title("🛢️ Data Engineering Quiz")
     st.error("The service is temporarily unavailable. Please try again later.")
-    with st.expander("Technical details"):
-        st.code(st.session_state["sf_err"])
     if st.button("Retry"):
         st.session_state.pop("sf_ok", None)
         st.cache_resource.clear()
@@ -49,36 +39,33 @@ if not st.session_state["sf_ok"]:
 # ── Sidebar ──────────────────────────────────────────────────
 with st.sidebar:
     st.title("🛢️ DE Quiz")
-    if is_logged_in():
-        user = st.session_state["user"]
-        if user.get("picture"):
-            st.image(user["picture"], width=48)
-        st.write(f"**{user['display_name']}**")
-        if not user.get("is_guest"):
-            st.caption(user["email"])
-        if st.button("Log out"):
-            logout()
+    if "user" in st.session_state:
+        st.write(f"**{st.session_state['user']['display_name']}**")
+        if st.button("Change name"):
+            st.session_state.pop("user", None)
+            for key in ["questions", "current_q", "answers", "score",
+                        "quiz_done", "selected_topics", "difficulty",
+                        "num_questions", "show_on_leaderboard"]:
+                st.session_state.pop(key, None)
             st.rerun()
         st.divider()
-        nav_options = ["Quiz", "Leaderboard"]
-        if not user.get("is_guest"):
-            nav_options.insert(1, "My History")
-        page = st.radio("Navigate", nav_options)
+        page = st.radio("Navigate", ["Quiz", "Leaderboard"])
     else:
         page = "home"
 
 
-# ── Helper: reset quiz state ─────────────────────────────────
+# ── Helper ───────────────────────────────────────────────────
 def reset_quiz():
     for key in ["questions", "current_q", "answers", "score",
-                "quiz_done", "selected_topics", "difficulty", "num_questions"]:
+                "quiz_done", "selected_topics", "difficulty",
+                "num_questions", "show_on_leaderboard"]:
         st.session_state.pop(key, None)
 
 
 # ═══════════════════════════════════════════════════════════════
-# PAGE: Home / Login
+# PAGE: Landing — enter name
 # ═══════════════════════════════════════════════════════════════
-if not is_logged_in():
+if "user" not in st.session_state:
     st.title("🛢️ Data Engineering Quiz")
     st.markdown(
         "Test your knowledge across SQL, Snowflake, dbt, Spark, Databricks, "
@@ -87,37 +74,17 @@ if not is_logged_in():
     )
     st.divider()
 
-    auth_url = get_auth_url()
-    st.link_button("Sign in with Google", auth_url, type="primary", use_container_width=True)
-
-    st.markdown("**— or —**")
-
-    with st.form("guest_form"):
-        guest_name = st.text_input("Play as guest", placeholder="Enter your name")
-        submitted = st.form_submit_button("Continue as Guest", use_container_width=True)
+    with st.form("name_form"):
+        name = st.text_input("Enter your name to begin", placeholder="Your name")
+        submitted = st.form_submit_button("Let's go →", type="primary",
+                                          use_container_width=True)
         if submitted:
-            name = guest_name.strip() or "Guest"
             st.session_state["user"] = {
-                "email":        f"guest_{name.lower().replace(' ', '_')}",
-                "display_name": name,
-                "picture":      "",
-                "is_guest":     True,
+                "display_name": name.strip() or "Anonymous",
+                "email":        f"user_{name.strip().lower().replace(' ', '_')}",
             }
-            st.session_state["user_id"] = None
             st.rerun()
-
     st.stop()
-
-
-# ── Ensure registered user is in Snowflake ───────────────────
-user = st.session_state["user"]
-if "user_id" not in st.session_state:
-    if not user.get("is_guest"):
-        st.session_state["user_id"] = upsert_user(
-            user["email"], user["display_name"], user.get("picture", "")
-        )
-    else:
-        st.session_state["user_id"] = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -125,7 +92,6 @@ if "user_id" not in st.session_state:
 # ═══════════════════════════════════════════════════════════════
 if page == "Quiz":
 
-    # ── Setup screen ─────────────────────────────────────────
     if "questions" not in st.session_state:
         st.title("New Quiz")
 
@@ -144,9 +110,10 @@ if page == "Quiz":
         show_on_leaderboard = st.checkbox(
             "Add my score to the public leaderboard", value=True
         )
+
         if st.button("Start Quiz 🚀", type="primary", use_container_width=True,
                      disabled=len(selected_topics) == 0):
-            with st.spinner("Generating your quiz with Cortex… this may take ~15 seconds on first run."):
+            with st.spinner("Generating your quiz… this may take ~20 seconds on first run."):
                 questions = get_questions(selected_topics, difficulty, num_questions)
 
             if not questions:
@@ -154,20 +121,20 @@ if page == "Quiz":
                 st.stop()
 
             st.session_state.update({
-                "questions":          questions,
-                "current_q":          0,
-                "answers":            {},
-                "score":              0,
-                "quiz_done":          False,
-                "selected_topics":    selected_topics,
-                "difficulty":         difficulty,
-                "num_questions":      num_questions,
+                "questions":           questions,
+                "current_q":           0,
+                "answers":             {},
+                "score":               0,
+                "quiz_done":           False,
+                "selected_topics":     selected_topics,
+                "difficulty":          difficulty,
+                "num_questions":       num_questions,
                 "show_on_leaderboard": show_on_leaderboard,
             })
             st.rerun()
         st.stop()
 
-    # ── Quiz done — results screen ────────────────────────────
+    # ── Results screen ────────────────────────────────────────
     if st.session_state.get("quiz_done"):
         questions = st.session_state["questions"]
         score     = st.session_state["score"]
@@ -254,8 +221,9 @@ if page == "Quiz":
                 st.rerun()
         else:
             if st.button("See Results 🏁", type="primary"):
+                user = st.session_state["user"]
                 save_session(
-                    user_id             = st.session_state["user_id"],
+                    user_id             = None,
                     email               = user["email"],
                     display_name        = user["display_name"],
                     topics              = st.session_state["selected_topics"],
@@ -266,25 +234,6 @@ if page == "Quiz":
                 )
                 st.session_state["quiz_done"] = True
                 st.rerun()
-
-
-# ═══════════════════════════════════════════════════════════════
-# PAGE: My History  (registered users only)
-# ═══════════════════════════════════════════════════════════════
-elif page == "My History":
-    import pandas as pd
-
-    st.title("My Quiz History")
-    history = fetch_user_history(user["email"])
-
-    if not history:
-        st.info("You haven't completed any quizzes yet. Start one from the Quiz tab!")
-    else:
-        df = pd.DataFrame(history)
-        df["topics"] = df["topics"].apply(lambda t: ", ".join(t) if isinstance(t, list) else t)
-        df["completed_at"] = pd.to_datetime(df["completed_at"]).dt.strftime("%Y-%m-%d %H:%M")
-        df.columns = ["Difficulty", "Questions", "Score", "Score %", "Topics", "Date"]
-        st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -300,7 +249,9 @@ elif page == "Leaderboard":
         st.info("No scores yet — be the first to finish a quiz!")
     else:
         df = pd.DataFrame(board)
-        df["topics"] = df["topics"].apply(lambda t: ", ".join(t) if isinstance(t, list) else t)
+        df["topics"] = df["topics"].apply(
+            lambda t: ", ".join(t) if isinstance(t, list) else t
+        )
         df["completed_at"] = pd.to_datetime(df["completed_at"]).dt.strftime("%Y-%m-%d %H:%M")
         df.insert(0, "Rank", range(1, len(df) + 1))
         df.columns = ["Rank", "Name", "Difficulty", "Questions",
